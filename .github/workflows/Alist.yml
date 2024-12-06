@@ -1,66 +1,65 @@
-name: 0上传至Alist
+name: 逐文件并行下载并上传至Alist
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
-      path:
-        description: '下载路径'
+      folder_path:
+        description: '需要下载的文件夹路径'
         required: true
-        default: 'Onedriver'
+        default: '/dav/迅雷x/我的云盘/2024年10月合集'
+      upload_path:
+        description: '上传到的目标路径'
+        required: true
+        default: '/dav/里番'
 
 jobs:
-  Onedriver:
+  AlistJob:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: 增加可用空间 (删除dotnet, android、haskell、CodeQL)
-        shell: bash
+      - name: 安装所需工具
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo apt update
+          sudo apt install -y curl jq parallel
 
-      - name: Aria2 Install
-        run: |
-            sudo apt update
-            sudo apt install -y aria2 nodejs curl
-
-      - name: 生成Alist的配置文件
-        id: create-json
-        uses: jsdaniell/create-json@v1.2.2
-        with:
-          name: "config.json"
-          json: ${{ secrets.ALIST_CONFIG }}
-          
-      - name: 运行Alist
+      - name: 下载并解压 Alist
         run: |
           curl -L -o alist.tar.gz https://github.com/alist-org/alist/releases/download/v3.30.0/alist-linux-amd64.tar.gz
           tar -xzf alist.tar.gz
           mkdir data
           mv config.json data/config.json
           nohup ./alist server > nohupcmd.out 2>&1 &
-          ls ${{github.workspace}}/data
         env:
           ALIST_ADMIN_PASSWORD: admin
 
-      - name: 等Alist运行起来(大概2分钟)
-        run: sleep 120s
-        shell: bash
-          
-      - name: 'Download file'
-        run: |
-          aria2c --conf $GITHUB_WORKSPACE/aria2.conf --seed-time=0 -d downloads -c 'https://ipfs.4everland.io/ipfs/QmULDFRSM8MYk8fr6e48UHbgKdTbR1RxrvA57x24d5j5yA/Lollipop.mp3' -o 'Lollipop.mp3' 
+      - name: 等待 Alist 启动
+        run: sleep 60s
 
-      - name: 上传到Alist
+      - name: 获取文件夹中的文件列表
+        id: list-files
         run: |
-          curl -v -u 'admin:admin' -T 'downloads/Lollipop.mp3' http://localhost:5244/dav/hefamily/files/Lollipop.mp3
-          
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v1.2.3
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 0
-          keep_minimum_runs: 0
+          API_URL="http://localhost:5244/api/public/path"
+          FOLDER_PATH="${{ inputs.folder_path }}"
+          FILE_LIST=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
+            -d "{\"path\":\"$FOLDER_PATH\"}" | jq -r '.data.content[] | select(.type=="file") | .name')
 
+          if [ -z "$FILE_LIST" ]; then
+            echo "未发现任何文件。"
+            exit 1
+          fi
+
+          echo "$FILE_LIST" > files_to_process.txt
+        env:
+          ALIST_ADMIN_PASSWORD: admin
+
+      - name: 并行下载并上传文件
+        run: |
+          DOWNLOAD_BASE="http://localhost:5244${{ inputs.folder_path }}"
+          UPLOAD_BASE="http://localhost:5244${{ inputs.upload_path }}"
+
+          cat files_to_process.txt | parallel -j 10 "
+            # 下载文件
+            curl -o {1} $DOWNLOAD_BASE/{1} --user admin:admin && 
+            # 上传文件
+            curl -T {1} $UPLOAD_BASE/{1} --user admin:admin && 
+            # 删除本地文件
+            rm -f {1}
+          "
