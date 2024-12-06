@@ -21,14 +21,10 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
 
-      - name: Install dependencies
+      - name: Aria2 Install
         run: |
-          sudo apt update
-          sudo apt install -y nodejs curl fuse
-
-      - name: Install rclone
-        run: |
-          curl https://rclone.org/install.sh | sudo bash
+            sudo apt update
+            sudo apt install -y aria2 nodejs curl
 
       - name: 生成Alist的配置文件
         id: create-json
@@ -51,23 +47,15 @@ jobs:
       - name: 等Alist运行起来(大概2分钟)
         run: sleep 120s
         shell: bash
-
-      - name: 生成rclone配置文件
+          
+      - name: 'Download file'
         run: |
-          cat << EOF > rclone.conf
-          [alist]
-          type = webdav
-          url = http://localhost:5244/dav/
-          vendor = other
-          user = admin
-          pass = admin
-          EOF
+          aria2c --conf $GITHUB_WORKSPACE/aria2.conf --seed-time=0 -d downloads -c 'http://localhost:5244/dav/%E8%BF%85%E9%9B%B7x/%E6%88%91%E7%9A%84%E4%BA%91%E7%9B%98/%E8%BD%AC%E7%A7%BB/2024%E5%B9%B410%E6%9C%88%E5%90%88%E9%9B%86/CHS/[241025][%E9%AD%94%E4%BA%BA]%E3%83%A1%E3%82%AB%E6%8A%80%E5%B8%AB%E3%83%AA%E3%82%B9%E3%82%BF%E3%81%AE%E5%A4%A7%E5%86%92%E9%99%BA%20%E7%AC%AC%E4%B8%80%E8%A9%B1%20%E9%9B%BB%E6%B3%A2%E3%82%B8%E3%83%A3%E3%83%83%E3%82%AF%E3%81%A7%E5%A4%A7%E6%B7%B7%E4%B9%B1!%20%E3%83%8C%E3%83%AB%E3%83%8C%E3%83%AB%E8%A7%A6%E6%89%8B%E3%82%92%E6%89%93%E3%81%A1%E5%80%92%E3%81%9B%EF%BC%81.chs.mp4' -o '[241025][魔人]メカ技師リスタの大冒険 第一話 電波ジャックで大混乱! ヌルヌル触手を打ち倒せ！.chs.mp4' 
 
-      - name: 复制文件到另一个Alist文件夹
+      - name: 上传到Alist
         run: |
-          # 复制Alist的source文件夹到destination文件夹
-          rclone copy alist:/迅雷x/我的云盘/转移 alist:/里番 --config=rclone.conf
-
+          curl -v -u 'admin:admin' -T 'downloads/[241025][魔人]メカ技師リスタの大冒険 第一話 電波ジャックで大混乱! ヌルヌル触手を打ち倒せ！.chs.mp4' http://localhost:5244/dav/里番/[241025][魔人]メカ技師リスタの大冒険 第一話 電波ジャックで大混乱! ヌルヌル触手を打ち倒せ！.chs.mp4
+          
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v1.2.3
         with:
