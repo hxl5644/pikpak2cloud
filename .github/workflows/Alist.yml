@@ -1,4 +1,4 @@
-name: 逐文件并行下载并上传至Alist
+name: 优化下载并上传至Alist
 on:
   repository_dispatch:
   workflow_dispatch:
@@ -18,24 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: 增加可用空间 (删除dotnet, android、haskell、CodeQL)
-        shell: bash
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-
-      - name: Aria2 Install
+      - name: 安装依赖工具
         run: |
           sudo apt update
-          sudo apt install -y aria2 nodejs curl jq parallel
+          sudo apt install -y aria2 nodejs curl jq parallel rclone
 
-      - name: Install rclone
-        run: |
-          curl https://rclone.org/install.sh | sudo bash
-
-      - name: Configure rclone
+      - name: 配置rclone
         run: |
           # 创建rclone配置文件
           cat << EOF > rclone.conf
@@ -47,7 +35,7 @@ jobs:
           pass = ${{ secrets.ALIST_PASS }}
           EOF
 
-      - name: 生成Alist的配置文件
+      - name: 生成Alist配置文件
         id: create-json
         uses: jsdaniell/create-json@v1.2.2
         with:
@@ -65,7 +53,7 @@ jobs:
         env:
           ALIST_ADMIN_PASSWORD: ${{ secrets.ALIST_ADMIN_PASSWORD }}
 
-      - name: 等Alist运行起来(大概2分钟)
+      - name: 等待Alist启动
         run: sleep 120s
         shell: bash
           
@@ -74,8 +62,32 @@ jobs:
         run: |
           API_URL="http://localhost:5244/api/public/path"
           SOURCE_PATH="${{ inputs.source_path }}"
-          FILE_LIST=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
-            -d "{\"path\":\"$SOURCE_PATH\"}" | jq -r '.data.content[] | select(.type=="file") | .name')
+
+          # 定义递归函数来获取所有文件
+          get_files() {
+            local path=$1
+            local file_list
+
+            # 请求当前路径下的文件和文件夹列表
+            file_list=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
+              -d "{\"path\":\"$path\"}" | jq -r '.data.content[] | select(.type=="file") | .name')
+
+            # 如果文件列表不为空，输出文件名
+            if [ ! -z "$file_list" ]; then
+              echo "$file_list"
+            fi
+
+            # 获取所有子文件夹，并递归调用get_files函数
+            directories=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
+              -d "{\"path\":\"$path\"}" | jq -r '.data.content[] | select(.type=="dir") | .name')
+
+            for dir in $directories; do
+              get_files "$path/$dir"
+            done
+          }
+
+          # 调用递归函数获取文件列表
+          FILE_LIST=$(get_files "$SOURCE_PATH")
 
           if [ -z "$FILE_LIST" ]; then
             echo "未发现任何文件。"
@@ -86,23 +98,29 @@ jobs:
         env:
           ALIST_ADMIN_PASSWORD: ${{ secrets.ALIST_ADMIN_PASSWORD }}
 
-      - name: 并行下载并上传文件
+      - name: 批量下载文件
         run: |
           DOWNLOAD_BASE="http://localhost:5244${{ inputs.source_path }}"
+          cat files_to_process.txt | aria2c -j 5 -x 16 -i -  --dir=downloads
+        # -j 5 限制同时下载任务数为 5
+        # -x 16 每个文件最多使用 16 个连接进行下载
+
+      - name: 并行上传文件到Alist
+        run: |
           UPLOAD_BASE="http://localhost:5244${{ inputs.destination_path }}"
 
-          cat files_to_process.txt | parallel -j 10 "
-            # 创建临时目录
-            mkdir -p downloads
-            # 下载文件
-            curl -o downloads/{1} $DOWNLOAD_BASE/{1} --user ${{ secrets.ALIST_USER }}:${{ secrets.ALIST_PASS }} &&
-            # 上传文件
-            curl -T downloads/{1} $UPLOAD_BASE/{1} --user ${{ secrets.ALIST_USER }}:${{ secrets.ALIST_PASS }} &&
-            # 删除本地文件
+          # 使用rclone并行上传文件
+          cat files_to_process.txt | parallel -j 5 "
+            rclone copy downloads/{1} alist:{UPLOAD_BASE}/{1} --user ${{ secrets.ALIST_USER }}:${{ secrets.ALIST_PASS }} --progress &&
             rm -f downloads/{1}
           "
+        # -j 5 限制上传的并行任务数为 5
 
-      - name: Delete workflow runs
+      - name: 清理本地临时文件
+        run: |
+          rm -rf downloads
+          
+      - name: 删除工作流运行记录
         uses: Mattraks/delete-workflow-runs@v1.2.3
         with:
           token: ${{ github.token }}
