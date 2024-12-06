@@ -6,7 +6,7 @@ on:
       source_path:
         description: '需要下载的文件夹路径'
         required: true
-        default: '/dav/迅雷x/我的云盘/2024年10月合集'
+        default: '/dav/迅雷x/我的云盘/转移'
       destination_path:
         description: '上传到的目标路径'
         required: true
