@@ -1,41 +1,36 @@
-name: 优化下载并上传至Alist
+name: 0上传至Alist
 on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
-      source_path:
-        description: '需要下载的文件夹路径'
+      path:
+        description: '下载路径'
         required: true
-        default: '/dav/迅雷x/我的云盘/转移'
-      destination_path:
-        description: '上传到的目标路径'
-        required: true
-        default: '/dav/里番'
+        default: 'Onedriver'
 
 jobs:
   Onedriver:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: 增加可用空间 (删除dotnet, android、haskell、CodeQL)
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
 
-      - name: 安装依赖工具
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y aria2 nodejs curl jq parallel rclone
+          sudo apt install -y nodejs curl fuse
 
-      - name: 配置rclone
+      - name: Install rclone
         run: |
-          # 创建rclone配置文件
-          cat << EOF > rclone.conf
-          [alist]
-          type = webdav
-          url = http://localhost:5244/dav/
-          vendor = other
-          user = ${{ secrets.ALIST_USER }}
-          pass = ${{ secrets.ALIST_PASS }}
-          EOF
+          curl https://rclone.org/install.sh | sudo bash
 
-      - name: 生成Alist配置文件
+      - name: 生成Alist的配置文件
         id: create-json
         uses: jsdaniell/create-json@v1.2.2
         with:
@@ -51,76 +46,29 @@ jobs:
           nohup ./alist server > nohupcmd.out 2>&1 &
           ls ${{github.workspace}}/data
         env:
-          ALIST_ADMIN_PASSWORD: ${{ secrets.ALIST_ADMIN_PASSWORD }}
+          ALIST_ADMIN_PASSWORD: admin
 
-      - name: 等待Alist启动
+      - name: 等Alist运行起来(大概2分钟)
         run: sleep 120s
         shell: bash
-          
-      - name: 获取文件夹中的文件列表
-        id: list-files
+
+      - name: 生成rclone配置文件
         run: |
-          API_URL="http://localhost:5244/api/public/path"
-          SOURCE_PATH="${{ inputs.source_path }}"
+          cat << EOF > rclone.conf
+          [alist]
+          type = webdav
+          url = http://localhost:5244/dav/
+          vendor = other
+          user = admin
+          pass = admin
+          EOF
 
-          # 定义递归函数来获取所有文件
-          get_files() {
-            local path=$1
-            local file_list
-
-            # 请求当前路径下的文件和文件夹列表
-            file_list=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
-              -d "{\"path\":\"$path\"}" | jq -r '.data.content[] | select(.type=="file") | .name')
-
-            # 如果文件列表不为空，输出文件名
-            if [ ! -z "$file_list" ]; then
-              echo "$file_list"
-            fi
-
-            # 获取所有子文件夹，并递归调用get_files函数
-            directories=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
-              -d "{\"path\":\"$path\"}" | jq -r '.data.content[] | select(.type=="dir") | .name')
-
-            for dir in $directories; do
-              get_files "$path/$dir"
-            done
-          }
-
-          # 调用递归函数获取文件列表
-          FILE_LIST=$(get_files "$SOURCE_PATH")
-
-          if [ -z "$FILE_LIST" ]; then
-            echo "未发现任何文件。"
-            exit 1
-          fi
-
-          echo "$FILE_LIST" > files_to_process.txt
-        env:
-          ALIST_ADMIN_PASSWORD: ${{ secrets.ALIST_ADMIN_PASSWORD }}
-
-      - name: 批量下载文件
+      - name: 复制文件到另一个Alist文件夹
         run: |
-          DOWNLOAD_BASE="http://localhost:5244${{ inputs.source_path }}"
-          cat files_to_process.txt | aria2c -j 5 -x 16 -i -  --dir=downloads
-        # -j 5 限制同时下载任务数为 5
-        # -x 16 每个文件最多使用 16 个连接进行下载
+          # 复制Alist的source文件夹到destination文件夹
+          rclone copy alist:/迅雷x/我的云盘/转移 alist:/里番 --config=rclone.conf
 
-      - name: 并行上传文件到Alist
-        run: |
-          UPLOAD_BASE="http://localhost:5244${{ inputs.destination_path }}"
-
-          # 使用rclone并行上传文件
-          cat files_to_process.txt | parallel -j 5 "
-            rclone copy downloads/{1} alist:{UPLOAD_BASE}/{1} --user ${{ secrets.ALIST_USER }}:${{ secrets.ALIST_PASS }} --progress &&
-            rm -f downloads/{1}
-          "
-        # -j 5 限制上传的并行任务数为 5
-
-      - name: 清理本地临时文件
-        run: |
-          rm -rf downloads
-          
-      - name: 删除工作流运行记录
+      - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v1.2.3
         with:
           token: ${{ github.token }}
