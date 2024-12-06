@@ -1,45 +1,81 @@
 name: 逐文件并行下载并上传至Alist
 on:
+  repository_dispatch:
   workflow_dispatch:
     inputs:
-      folder_path:
+      source_path:
         description: '需要下载的文件夹路径'
         required: true
         default: '/dav/迅雷x/我的云盘/2024年10月合集'
-      upload_path:
+      destination_path:
         description: '上传到的目标路径'
         required: true
         default: '/dav/里番'
 
 jobs:
-  AlistJob:
+  Onedriver:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装所需工具
+      - uses: actions/checkout@v2
+
+      - name: 增加可用空间 (删除dotnet, android、haskell、CodeQL)
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+
+      - name: Aria2 Install
         run: |
           sudo apt update
-          sudo apt install -y curl jq parallel
+          sudo apt install -y aria2 nodejs curl jq parallel
 
-      - name: 下载并解压 Alist
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone
+        run: |
+          # 创建rclone配置文件
+          cat << EOF > rclone.conf
+          [alist]
+          type = webdav
+          url = http://localhost:5244/dav/
+          vendor = other
+          user = ${{ secrets.ALIST_USER }}
+          pass = ${{ secrets.ALIST_PASS }}
+          EOF
+
+      - name: 生成Alist的配置文件
+        id: create-json
+        uses: jsdaniell/create-json@v1.2.2
+        with:
+          name: "config.json"
+          json: ${{ secrets.ALIST_CONFIG }}
+          
+      - name: 运行Alist
         run: |
           curl -L -o alist.tar.gz https://github.com/alist-org/alist/releases/download/v3.30.0/alist-linux-amd64.tar.gz
           tar -xzf alist.tar.gz
           mkdir data
           mv config.json data/config.json
           nohup ./alist server > nohupcmd.out 2>&1 &
+          ls ${{github.workspace}}/data
         env:
-          ALIST_ADMIN_PASSWORD: admin
+          ALIST_ADMIN_PASSWORD: ${{ secrets.ALIST_ADMIN_PASSWORD }}
 
-      - name: 等待 Alist 启动
-        run: sleep 60s
-
+      - name: 等Alist运行起来(大概2分钟)
+        run: sleep 120s
+        shell: bash
+          
       - name: 获取文件夹中的文件列表
         id: list-files
         run: |
           API_URL="http://localhost:5244/api/public/path"
-          FOLDER_PATH="${{ inputs.folder_path }}"
+          SOURCE_PATH="${{ inputs.source_path }}"
           FILE_LIST=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" \
-            -d "{\"path\":\"$FOLDER_PATH\"}" | jq -r '.data.content[] | select(.type=="file") | .name')
+            -d "{\"path\":\"$SOURCE_PATH\"}" | jq -r '.data.content[] | select(.type=="file") | .name')
 
           if [ -z "$FILE_LIST" ]; then
             echo "未发现任何文件。"
@@ -48,18 +84,28 @@ jobs:
 
           echo "$FILE_LIST" > files_to_process.txt
         env:
-          ALIST_ADMIN_PASSWORD: admin
+          ALIST_ADMIN_PASSWORD: ${{ secrets.ALIST_ADMIN_PASSWORD }}
 
       - name: 并行下载并上传文件
         run: |
-          DOWNLOAD_BASE="http://localhost:5244${{ inputs.folder_path }}"
-          UPLOAD_BASE="http://localhost:5244${{ inputs.upload_path }}"
+          DOWNLOAD_BASE="http://localhost:5244${{ inputs.source_path }}"
+          UPLOAD_BASE="http://localhost:5244${{ inputs.destination_path }}"
 
           cat files_to_process.txt | parallel -j 10 "
+            # 创建临时目录
+            mkdir -p downloads
             # 下载文件
-            curl -o {1} $DOWNLOAD_BASE/{1} --user admin:admin && 
+            curl -o downloads/{1} $DOWNLOAD_BASE/{1} --user ${{ secrets.ALIST_USER }}:${{ secrets.ALIST_PASS }} &&
             # 上传文件
-            curl -T {1} $UPLOAD_BASE/{1} --user admin:admin && 
+            curl -T downloads/{1} $UPLOAD_BASE/{1} --user ${{ secrets.ALIST_USER }}:${{ secrets.ALIST_PASS }} &&
             # 删除本地文件
-            rm -f {1}
+            rm -f downloads/{1}
           "
+
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v1.2.3
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0
